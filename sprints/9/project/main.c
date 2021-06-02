@@ -1,7 +1,7 @@
 /*
  * Controlador de Frequência de Respiração
  *
- * Created: 5/6/2021 03:29:42 AM
+ * Created: 5/22/2021 01:13:13 AM
  * Author : George Camboim
  */ 
 
@@ -18,7 +18,11 @@
 #define STATE_FREQ_RESP 0
 #define STATE_VAL_O2 1
 #define STATE_VOLUME 2
-#define STATE_MONITOR 3
+#define STATE_SETTINGS 3
+#define STATE_SETT_FREQ 4
+#define STATE_SETT_O2 5
+#define STATE_SETT_VOL 6
+#define STATE_MONITOR 7
 
 // Valores calculados previamente para converter leituras do ADC
 #define TEMP_PARAM_A 15.0/307.0
@@ -27,6 +31,7 @@
 
 // Include de bibliotecas
 #include <stdio.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
@@ -49,7 +54,17 @@ static volatile uint8_t limpar_display;
 
 static volatile uint32_t tempo_ms; //32 bits são suficientes para medir 49 dias de funcionamento
 
+// Variaveis relacionadas a transmissão UART
+static volatile char tx_msg[22];
+static volatile uint8_t tx_ptr;
+
+// Variaveis relacionadas a configuração de parametros
+static volatile uint8_t uart_freq_resp;
+static volatile uint8_t uart_o2;
+static volatile uint8_t uart_volume;
+
 // Declaração de funções auxiliares
+void inicia_tx(void);
 void atua_ventilador (void);
 void atua_valvula (void);
 
@@ -58,49 +73,97 @@ void atualiza_lcd_0 (void);
 void atualiza_lcd_1 (void);
 void atualiza_lcd_2 (void);
 void atualiza_lcd_3 (void);
+void atualiza_lcd_4 (void);
+void atualiza_lcd_5 (void);
+void atualiza_lcd_6 (void);
+void atualiza_lcd_7 (void);
 
 void atualiza_pressao (char*);
 uint8_t pressao_eh_valida (char*);
+void atualiza_comando (char*);
+uint8_t comando_eh_valido (char*);
 
 // Interrupções por botões de controle
 ISR (PCINT0_vect)
 {
 	// Caso botão "-" tenha sido pressionado
 	if ((PINB & 0x40) == 0x00){
-		if (estado_display == STATE_FREQ_RESP){
+		if (estado_display == STATE_FREQ_RESP && !uart_freq_resp){
 			if(freq_resp > 5) freq_resp--;
 		}
-		else if (estado_display ==  STATE_VAL_O2){
+		else if (estado_display ==  STATE_VAL_O2 && !uart_o2){
 			if (percent_O2 > 0) percent_O2 -= 10;
 			atua_valvula();
 		}
-		else if (estado_display ==  STATE_VOLUME){
+		else if (estado_display ==  STATE_VOLUME && !uart_volume){
 			if (volume > 0) volume -= 1;
+		}
+		else if (estado_display == STATE_SETTINGS){
+			estado_display = STATE_SETT_FREQ;
+			limpar_display = TRUE;
+		}
+		else if (estado_display == STATE_SETT_FREQ){
+			uart_freq_resp = !uart_freq_resp;
+			limpar_display = TRUE;
+		}
+		else if (estado_display == STATE_SETT_O2){
+			uart_o2 = !uart_o2;
+			limpar_display = TRUE;
+		}
+		else if (estado_display == STATE_SETT_VOL){
+			uart_volume = !uart_volume;
+			limpar_display = TRUE;
 		}
 	}
 	// Caso botão "+" tenha sido pressionado
 	if ((PINB & 0x80) == 0x00){
-		if (estado_display == STATE_FREQ_RESP){
+		if (estado_display == STATE_FREQ_RESP && !uart_freq_resp){
 			if(freq_resp < 30) freq_resp++;
 		}
-		else if (estado_display ==  STATE_VAL_O2){
+		else if (estado_display ==  STATE_VAL_O2 && !uart_o2){
 			if (percent_O2 < 100) percent_O2 += 10;
 			atua_valvula();
 		}
-		else if (estado_display ==  STATE_VOLUME){
+		else if (estado_display ==  STATE_VOLUME && !uart_volume){
 			if (volume < 8) volume += 1;
+		}
+		else if (estado_display == STATE_SETTINGS){
+			estado_display = STATE_SETT_FREQ;
+			limpar_display = TRUE;
+		}
+		else if (estado_display == STATE_SETTINGS){
+			estado_display = STATE_SETT_FREQ;
+			limpar_display = TRUE;
+		}
+		else if (estado_display == STATE_SETT_FREQ){
+			uart_freq_resp = !uart_freq_resp;
+			limpar_display = TRUE;
+		}
+		else if (estado_display == STATE_SETT_O2){
+			uart_o2 = !uart_o2;
+			limpar_display = TRUE;
+		}
+		else if (estado_display == STATE_SETT_VOL){
+			uart_volume = !uart_volume;
+			limpar_display = TRUE;
 		}
 	}
 	// Caso botão "Sel" tenha sido pressionado
 	if ((PINB & 0x01) == 0x00){
-		if (estado_display == STATE_FREQ_RESP)
+		if (estado_display == STATE_MONITOR)
+			estado_display = STATE_FREQ_RESP;
+		else if (estado_display == STATE_FREQ_RESP)
 			estado_display = STATE_VAL_O2;
 		else if (estado_display ==  STATE_VAL_O2)
 			estado_display = STATE_VOLUME;
-		else if (estado_display ==  STATE_VOLUME)
+		else if (estado_display ==  STATE_VOLUME || estado_display == STATE_SETT_VOL)
+			estado_display = STATE_SETTINGS;
+		else if (estado_display ==  STATE_SETT_FREQ)
+			estado_display = STATE_SETT_O2;
+		else if (estado_display ==  STATE_SETT_O2)
+			estado_display = STATE_SETT_VOL;
+		else if (estado_display ==  STATE_SETTINGS)
 			estado_display = STATE_MONITOR;
-		else
-			estado_display = STATE_FREQ_RESP;
 		
 		limpar_display = TRUE;
 	}
@@ -173,20 +236,37 @@ ISR(ADC_vect)
 	}
 }
 
-// Leitura de pressão através da UART
+// Leitura de pressão e comandos através da UART
 ISR(USART_RX_vect)
 {
 	static uint8_t wait_start = TRUE;
 	static char msg [7];
 	static uint8_t msg_ptr = 0;
+	static uint8_t flag_comando = FALSE;
 	
 	char rx_byte = UDR0;
 	// Esperando inicio da mensagem
 	if (wait_start){
 		if (rx_byte == ';') wait_start=FALSE;
 	}
-	// Protocolando o fim da mensagem
-	else if (msg_ptr == 7){
+	// Checando se é comando ou pressão
+	else if (msg_ptr == 0){
+		if(rx_byte == 'p')
+			flag_comando = TRUE;
+		else
+			flag_comando = FALSE;
+		msg[msg_ptr] = rx_byte;
+		msg_ptr++;
+	}
+	// Protocolando o fim da mensagem de comando
+	else if (flag_comando && msg_ptr == 5){		
+		if (rx_byte == ':' && comando_eh_valido(msg))
+			atualiza_comando(msg);
+		wait_start=TRUE;
+		msg_ptr = 0;
+	}
+	// Protocolando o fim da mensagem de pressao
+	else if (!flag_comando && msg_ptr == 7){
 		if (rx_byte == ':' && pressao_eh_valida(msg)) 
 			atualiza_pressao(msg);
 		else                
@@ -197,12 +277,14 @@ ISR(USART_RX_vect)
 	// Construindo mensagem
 	else{
 		if (rx_byte == ':') {
-			atualiza_pressao("#ERROR#");
+			if(!flag_comando)
+				atualiza_pressao("#ERROR#");
 			wait_start=TRUE;
 			msg_ptr = 0;
 		}
 		else if (rx_byte == ';'){
-			atualiza_pressao("#ERROR#");
+			if(!flag_comando)
+				atualiza_pressao("#ERROR#");
 			msg_ptr = 0;
 		}
 		else{
@@ -210,6 +292,34 @@ ISR(USART_RX_vect)
 			msg_ptr++;
 		}
 	}
+}
+
+// Interrupção de transmissão UART
+ISR(USART_TX_vect)
+{
+	if(tx_ptr==22){
+		tx_ptr=0;
+	}
+	else{
+		while(!(UCSR0A & (1<<UDRE0))){} // Espera registrador de UART ficar vazio
+		UDR0 = tx_msg[tx_ptr];
+		tx_ptr++;				
+	}
+}
+
+// Inicia transmissão UART de leituras
+void inicia_tx(){
+	char temp_tx_msg[22];
+	sprintf(temp_tx_msg, ";%03d,%d.%d,%03d,%.7s:", 
+			bpm, temp_corporal_t10 / 10, temp_corporal_t10 % 10, spO2, pressao_sis_dia);
+			
+	for(int i = 0; i < 22; i++){
+		tx_msg[i] = temp_tx_msg[i];
+	}
+	
+	while(!(UCSR0A & (1<<UDRE0))){} // Espera registrador de UART ficar vazio
+	UDR0 = tx_msg[0];
+	tx_ptr = 1;
 }
 
 // Atuação da bomba de ar do respirador
@@ -260,8 +370,16 @@ void atualiza_lcd (void)
 		atualiza_lcd_1();
 	else if (estado_display == STATE_VOLUME)
 		atualiza_lcd_2();
-	else
+	else if (estado_display == STATE_SETTINGS)
 		atualiza_lcd_3();
+	else if (estado_display == STATE_SETT_FREQ)
+		atualiza_lcd_4();
+	else if (estado_display == STATE_SETT_O2)
+		atualiza_lcd_5();
+	else if (estado_display == STATE_SETT_VOL)
+		atualiza_lcd_6();
+	else
+		atualiza_lcd_7();
 }
 
 // Display de Estado 0 - Configuração de Freq_Resp
@@ -281,6 +399,10 @@ void atualiza_lcd_0 (void)
 	
 	sprintf(display_str, "%03d     volume", volume);
 	nokia_lcd_set_cursor(0, 30);
+	nokia_lcd_write_string(display_str, 1);
+	
+	sprintf(display_str, "Settings");
+	nokia_lcd_set_cursor(0, 40);
 	nokia_lcd_write_string(display_str, 1);
 	
 	nokia_lcd_render();
@@ -305,6 +427,10 @@ void atualiza_lcd_1 (void)
 	nokia_lcd_set_cursor(0, 30);
 	nokia_lcd_write_string(display_str, 1);
 	
+	sprintf(display_str, "Settings");
+	nokia_lcd_set_cursor(0, 40);
+	nokia_lcd_write_string(display_str, 1);
+	
 	nokia_lcd_render();
 }
 
@@ -327,11 +453,139 @@ void atualiza_lcd_2 (void)
 	nokia_lcd_set_cursor(0, 30);
 	nokia_lcd_write_string(display_str, 1);
 	
+	sprintf(display_str, "Settings");
+	nokia_lcd_set_cursor(0, 40);
+	nokia_lcd_write_string(display_str, 1);
+	
 	nokia_lcd_render();
 }
 
-// Display de Estado 3 - Exibição de Sinais Vitais
+// Display de Estado 3 - Opção de Configuração
 void atualiza_lcd_3 (void)
+{
+	char display_str[15];
+	nokia_lcd_set_cursor(0, 0);
+	nokia_lcd_write_string("Parametros", 1);
+	
+	sprintf(display_str, "%02d      resp/min", freq_resp);
+	nokia_lcd_set_cursor(0, 10);
+	nokia_lcd_write_string(display_str, 1);
+	
+	sprintf(display_str, "%03d     %%O2", percent_O2);
+	nokia_lcd_set_cursor(0, 20);
+	nokia_lcd_write_string(display_str, 1);
+	
+	sprintf(display_str, "%03d     volume", volume);
+	nokia_lcd_set_cursor(0, 30);
+	nokia_lcd_write_string(display_str, 1);
+	
+	sprintf(display_str, "Settings *");
+	nokia_lcd_set_cursor(0, 40);
+	nokia_lcd_write_string(display_str, 1);
+	
+	nokia_lcd_render();
+}
+
+// Display de Estado 4 - Configuração UART de frequência
+void atualiza_lcd_4 (void)
+{
+	char display_str[15];
+	nokia_lcd_set_cursor(0, 0);
+	nokia_lcd_write_string("Param. UART", 1);
+	
+	if (uart_freq_resp)
+		sprintf(display_str, "freq_resp * ON");
+	else
+		sprintf(display_str, "freq_resp *OFF");
+	
+	nokia_lcd_set_cursor(0, 10);
+	nokia_lcd_write_string(display_str, 1);
+	
+	if (uart_o2)
+		sprintf(display_str, "%%O2         ON");
+	else
+		sprintf(display_str, "%%O2        OFF");
+	nokia_lcd_set_cursor(0, 20);
+	nokia_lcd_write_string(display_str, 1);
+	
+	if (uart_volume)
+		sprintf(display_str, "volume      ON");
+	else
+		sprintf(display_str, "volume     OFF");
+	nokia_lcd_set_cursor(0, 30);
+	nokia_lcd_write_string(display_str, 1);
+	
+	nokia_lcd_render();	
+}
+
+// Display de Estado 5 - Configuração UART de oxigenação
+void atualiza_lcd_5 (void)
+{
+	char display_str[15];
+	nokia_lcd_set_cursor(0, 0);
+	nokia_lcd_write_string("Param. UART", 1);
+	
+	if (uart_freq_resp)
+	sprintf(display_str, "freq_resp   ON");
+	else
+	sprintf(display_str, "freq_resp  OFF");
+	
+	nokia_lcd_set_cursor(0, 10);
+	nokia_lcd_write_string(display_str, 1);
+	
+	if (uart_o2)
+	sprintf(display_str, "%%O2       * ON");
+	else
+	sprintf(display_str, "%%O2       *OFF");
+	nokia_lcd_set_cursor(0, 20);
+	nokia_lcd_write_string(display_str, 1);
+	
+	if (uart_volume)
+	sprintf(display_str, "volume      ON");
+	else
+	sprintf(display_str, "volume     OFF");
+	nokia_lcd_set_cursor(0, 30);
+	nokia_lcd_write_string(display_str, 1);
+	
+	nokia_lcd_render();
+	
+}
+
+// Display de Estado 6 - Configuração UART de volume
+void atualiza_lcd_6 (void)
+{
+	char display_str[15];
+	nokia_lcd_set_cursor(0, 0);
+	nokia_lcd_write_string("Param. UART", 1);
+	
+	if (uart_freq_resp)
+	sprintf(display_str, "freq_resp   ON");
+	else
+	sprintf(display_str, "freq_resp  OFF");
+	
+	nokia_lcd_set_cursor(0, 10);
+	nokia_lcd_write_string(display_str, 1);
+	
+	if (uart_o2)
+	sprintf(display_str, "%%O2         ON");
+	else
+	sprintf(display_str, "%%O2        OFF");
+	nokia_lcd_set_cursor(0, 20);
+	nokia_lcd_write_string(display_str, 1);
+	
+	if (uart_volume)
+	sprintf(display_str, "volume    * ON");
+	else
+	sprintf(display_str, "volume    *OFF");
+	nokia_lcd_set_cursor(0, 30);
+	nokia_lcd_write_string(display_str, 1);
+	
+	nokia_lcd_render();
+	
+}
+
+// Display de Estado 7 - Exibição de Sinais Vitais
+void atualiza_lcd_7 (void)
 {	
 	char display_str[15];
 	nokia_lcd_set_cursor(0, 0);
@@ -357,18 +611,56 @@ void atualiza_lcd_3 (void)
 }
 
 // Função para realizar assign de string (função da stdlib buga com variaveis volatiles)
-void atualiza_pressao(char* str_sete){
+void atualiza_pressao(char* str_sete)
+{
 	for(int i = 0; i < 7; i++){
 		pressao_sis_dia[i] = str_sete[i];
 	}	
 }
 
 // Teste de validade da pressão recebida
-uint8_t pressao_eh_valida(char* str_sete){
+uint8_t pressao_eh_valida(char* str_sete)
+{
 	if (str_sete[3] != 'x') return FALSE;
 	for(int i = 0; i < 3; i++){
 		if (!isdigit(str_sete[i])) return FALSE;
 		if (!isdigit(str_sete[i+4])) return FALSE;
+	}
+	return TRUE;
+}
+
+// Atualiza parametros através da UART
+void atualiza_comando(char* str_cinco)
+{
+	char valor_str[3];
+	uint8_t valor_int;
+	
+	// Casting de string para int
+	for (int i = 0; i < 3; i++)
+		valor_str[i] = str_cinco[i+2];
+	valor_int= atoi(valor_str);
+	 
+	if (str_cinco[1] == 'f' && uart_freq_resp){
+		if(valor_int >= 5 && valor_int <= 30)
+			freq_resp = valor_int;		
+	}
+	else if (str_cinco[1] == 'o' && uart_o2){
+		if(valor_int >= 0 && valor_int <= 100)
+			percent_O2 = valor_int;
+		
+	}
+	else if (str_cinco[1] == 'v' && uart_volume){
+		if(valor_int >= 0 && valor_int <= 8)
+			volume = valor_int;		
+	}
+}
+
+// Teste se o comando realmente é um comando
+uint8_t comando_eh_valido (char* str_cinco)
+{
+	if (str_cinco[0] != 'p') return FALSE;
+	for(int i = 0; i < 3; i++){
+		if (!isdigit(str_cinco[i+2])) return FALSE;
 	}
 	return TRUE;
 }
@@ -418,7 +710,7 @@ void setup(void)
 	// Configuração da UART
 	UBRR0L = (MYUBBR) & 0xFF;
 	UBRR0H = (MYUBBR) >> 8;
-	UCSR0B = (1<<RXCIE0)|(1<<RXEN0); // Enable de RX com interrupção
+	UCSR0B = (1<<RXCIE0)|(1<<RXEN0)|(1<<TXCIE0)|(1<<TXEN0); // Enable de RXTX com interrupção
 	UCSR0C = (1<<UCSZ01)|(1<<UCSZ00); // Assíncrono de 8bits sem paridade
 	
 	// Ativação de interrupções
@@ -431,7 +723,10 @@ void setup(void)
 	temp_corporal_t10 = 350;
 	spO2 = 50;
 	atualiza_pressao("000x000");
-	estado_display = STATE_MONITOR;
+	estado_display = STATE_MONITOR;	
+	uart_freq_resp = FALSE;
+	uart_o2 = FALSE;
+	uart_volume = FALSE;
 	tempo_ms = 0;
 	
 	// Configuração de LCD
@@ -451,11 +746,14 @@ int main(void)
     while (1){
 		_delay_ms(200);
 		atualiza_lcd();
+		// Buzzer
 		if ((temp_corporal_t10 < 410 && temp_corporal_t10 > 350) || (spO2 < 60)){
 			PORTB = (PORTB & 0xEF) | 0x10;
 		}
 		else{
 			PORTB = (PORTB & 0xEF);
 		}
+		
+		inicia_tx();
 	}
 }

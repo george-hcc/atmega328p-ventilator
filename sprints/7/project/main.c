@@ -2,7 +2,7 @@
  * Controlador de Frequência de Respiração
  *
  * Created: 4/26/2021 03:22:22 PM
- * Author : Nicolas Pereira
+ * Author : George Camboim
  */ 
 
 // Defines de configuração de valores auxiliares

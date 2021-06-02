@@ -2,7 +2,7 @@
  * Controlador de Frequência de Respiração
  *
  * Created: 4/22/2021 06:52:57 AM
- * Author : Nicolas Pereira
+ * Author : George Camboim
  */ 
 
 #define F_CPU 16000000UL
