@@ -1,5 +1,5 @@
 /*
- * Controlador de Frequência de Respiração
+ * Ventilador Respiratório - Atmega328p
  *
  * Created: 5/22/2021 01:13:13 AM
  * Author : George Camboim
@@ -645,9 +645,10 @@ void atualiza_comando(char* str_cinco)
 			freq_resp = valor_int;		
 	}
 	else if (str_cinco[1] == 'o' && uart_o2){
-		if(valor_int >= 0 && valor_int <= 100)
-			percent_O2 = valor_int;
-		
+		if(valor_int >= 0 && valor_int <= 100){
+			percent_O2 = (valor_int % 10) * 10;
+			atua_valvula();
+		}
 	}
 	else if (str_cinco[1] == 'v' && uart_volume){
 		if(valor_int >= 0 && valor_int <= 8)
